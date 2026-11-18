@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <base href="https://github.com/hummingbird-9/hummingbird-9.github.io">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Games — humming[bird]Tech</title>
+  <link rel="stylesheet" href="style.css?v=20261115-shared-topbar-restore-15">
+  <link rel="shortcut icon" href="https://uploads.onecompiler.io/447kr4gf2/44f9wbztv/humming%5Bbird%5DTech%20logo%20(4).png">
+</head>
+<body class="gallery-body">
+  <main class="home-page-main">
+    <h1>Games</h1>
+    <p class="content">Browse, search, bookmark, and play games.</p>
+
+  <section id="gamesLibraryPanel" class="games-library-panel" role="tabpanel" aria-labelledby="gamesLibraryTab">
+    <div class="games-library-topbar">
+    <form id="gameSearchForm" class="games-search-form" role="search">
+      <label class="visually-hidden" for="searchBar">Find a game</label>
+      <div class="games-search-controls">
+        <input type="text" id="searchBar" class="search-bar" placeholder="Search games..." autocomplete="off" spellcheck="false" aria-label="Search games">
+        <button id="submitGamesSearch" class="utility-btn games-submit-search" type="submit">Search</button>
+      </div>
+    </form>
+    <div class="games-search-side-actions" aria-label="Quick actions">
+      <button id="refreshGames" class="utility-btn" type="button" title="Refresh the games from GitHub">↻ Refresh</button>
+      <button id="randomGame" class="utility-btn" type="button" title="Launch a random game">Random game</button>
+    </div>
+    </div>
+
+    <div class="games-toolbar" aria-label="Game library controls">
+      <section class="games-control-group games-library-group" aria-label="Library actions">
+        <div class="games-actions-row">
+          <label class="games-sort-control">
+            <span class="visually-hidden">Sort games</span>
+            <select id="gamesSort" class="utility-btn" aria-label="Sort games">
+              <option value="az">Sort: A–Z</option>
+              <option value="za">Sort: Z–A</option>
+              <option value="recent">Sort: Recently played</option>
+            </select>
+          </label>
+          <button id="bookmarkFilter" class="utility-btn" type="button" aria-pressed="false">☆ Bookmarks</button>
+        </div>
+      </section>
+      <select id="htmlSelector" hidden aria-hidden="true" tabindex="-1" disabled>
+        <option value="">Open a game to choose its HTML file</option>
+      </select>
+    </div>
+
+    <div id="gamesStatus" role="status" aria-live="polite">Loading...</div>
+    <div id="gamesTotal"></div>
+    <div id="container" class="gallery-container"></div>
+    <div id="gamesPagination" class="games-pagination" hidden>
+      <button id="loadMoreGames" class="utility-btn" type="button">Load 100 more</button>
+      <span id="gamesPaginationStatus" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section id="gameViewer" aria-hidden="true" aria-label="Game player">
+    <header class="game-viewer-navbar">
+      <h2 id="gameViewerTitle">Game</h2>
+      <div class="game-viewer-controls">
+        <button id="aboutBlankGame" class="utility-btn" type="button">Open in new tab</button>
+        <button id="downloadActiveGame" class="utility-btn" type="button">Download game</button>
+        <button id="closeGame" class="utility-btn" type="button">Close</button>
+      </div>
+    </header>
+    <div id="gameFrameWrap" class="game-frame-wrap"></div>
+  </section>
+
+  <script src="global-utils.js?v=20261115-iframe-focus-disguise-fix-13"></script>
+  <script>
+  (() => {
+    'use strict';
+
+    const OWNER = 'hummingbird-9';
+    const REPO = 'github.com/hummingbird-9/games';
+    const BRANCH = 'main';
+    const TREE_API = `https://api.github.com/repos/${OWNER}/${REPO}/git/trees/${BRANCH}?recursive=1`;
+    // Game HTML must come from GitHub Pages: jsDelivr serves .html as text/plain.
+    // The mirrored game folders preserve original relative paths for scripts, data, workers, and media.
+    // Keep jsDelivr for cover images and ZIP downloads.
+    const CDN_ROOT = `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@${BRANCH}/`;
+    const GAME_PAGES_ROOT = window.location.origin + 'https://github.com/hummingbird-9/games/';
+    const CACHE_KEY = 'hummingbird-games-folder-catalog-v4';
+    const PAGE_SIZE = 100;
+    const BOOKMARKS_KEY = 'hummingbird-games-bookmarks-v1';
+    const RECENT_KEY = 'hummingbird-games-recent-v1';
+    const CACHE_TTL = 60 * 60 * 1000;
+    const SITE_SETTINGS_KEY = 'hummingbird_site_preferences_v1';
+
+    const container = document.getElementById('container');
+    const searchBar = document.getElementById('searchBar');
+    const statusEl = document.getElementById('gamesStatus');
+    const totalEl = document.getElementById('gamesTotal');
+    const htmlSelector = document.getElementById('htmlSelector');
+    const viewer = document.getElementById('gameViewer');
+    const viewerTitle = document.getElementById('gameViewerTitle');
+    const frameWrap = document.getElementById('gameFrameWrap');
+    const bookmarkFilter = document.getElementById('bookmarkFilter');
+    const sortSelect = document.getElementById('gamesSort');
+    const randomGameButton = document.getElementById('randomGame');
+    const searchForm = document.getElementById('gameSearchForm');
+    const pagination = document.getElementById('gamesPagination');
+    const loadMoreButton = document.getElementById('loadMoreGames');
+    const paginationStatus = document.getElementById('gamesPaginationStatus');
+
+    let games = [];
+    let visibleGames = [];
+    let currentLimit = PAGE_SIZE;
+    let bookmarks = loadBookmarks();
+    let recentlyPlayed = loadRecentlyPlayed();
+    let showRecentlyPlayedGames = loadShowRecentlyPlayedSetting();
+    let activeSearchQuery = '';
+    let restoredGameFromAddress = false;
+    let sortMode = 'az';
+    let showBookmarkedOnly = false;
+    let activeGame = null;
+    let activeHtml = 'index.html';
+    let activeLoadToken = 0;
+    let isLoading = false;
+
+    function encodePath(path) {
+      return String(path).split('/').map(part => encodeURIComponent(part)).join('/');
+    }
+
+    function gameUrl(game, htmlFile) {
+      return GAME_PAGES_ROOT + encodePath(game.folder + '/' + (htmlFile || 'index.html'));
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[character]);
+    }
+
+    function humanizeFolder(folder) {
+      return folder
+        .replace(/[-_]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b([a-z])/g, letter => letter.toUpperCase());
+    }
+
+    function chooseCover(folder, imagePaths) {
+      // Only use an explicitly named cover image in the game's own folder.
+      // Random screenshots, logos, sprites, and images in asset subfolders are not covers.
+      const extensionPriority = ['webp', 'avif', 'png', 'jpg', 'jpeg', 'gif', 'bmp'];
+      const rootCovers = imagePaths.filter(path => {
+        const relativePath = path.slice(folder.length + 1);
+        return !relativePath.includes('/') && /^cover\.(png|jpe?g|avif|webp|gif|bmp)$/i.test(relativePath);
+      });
+      return rootCovers.sort((a, b) => {
+        const extA = a.split('.').pop().toLowerCase();
+        const extB = b.split('.').pop().toLowerCase();
+        return extensionPriority.indexOf(extA) - extensionPriority.indexOf(extB) || a.localeCompare(b);
+      })[0] || '';
+    }
+
+    function makeCatalog(treeEntries) {
+      const byFolder = new Map();
+      const imagePattern = /\.(jpe?g|png|webp|avif|gif|bmp)$/i;
+      for (const entry of treeEntries) {
+        if (!entry || entry.type !== 'blob' || typeof entry.path !== 'string') continue;
+        const match = entry.path.match(/^([^/]+)\/(.+)$/);
+        if (!match) continue;
+        const folder = match[1];
+        const relativePath = match[2];
+        if (folder.startsWith('.')) continue;
+        if (!byFolder.has(folder)) byFolder.set(folder, { htmlFiles: [], imagePaths: [] });
+        const record = byFolder.get(folder);
+        if (/\.html?$/i.test(relativePath) && !relativePath.includes('/')) record.htmlFiles.push(relativePath);
+        if (imagePattern.test(relativePath)) record.imagePaths.push(entry.path);
+      }
+
+      const result = [];
+      for (const [folder, record] of byFolder) {
+        const htmlFiles = record.htmlFiles.sort((a, b) => {
+          if (a.toLowerCase() === 'index.html') return -1;
+          if (b.toLowerCase() === 'index.html') return 1;
+          return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+        });
+        if (!htmlFiles.some(file => file.toLowerCase() === 'index.html')) continue;
+        const coverPath = chooseCover(folder, record.imagePaths);
+        result.push({
+          folder,
+          title: humanizeFolder(folder),
+          htmlFiles,
+          coverPath,
+          searchText: (folder + ' ' + humanizeFolder(folder)).toLowerCase()
+        });
+      }
+      return result.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }));
+    }
+
+    function updateSearchUrl() {
+      const url = new URL(window.location.href);
+      const query = activeSearchQuery;
+      if (query) url.searchParams.set('q', query);
+      else url.searchParams.delete('q');
+      window.history.replaceState({ ...(window.history.state || {}), activeGame: activeGame ? activeGame.folder : null }, '', url.pathname + url.search + url.hash);
+    }
+
+    function loadBookmarks() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || '[]');
+        return new Set(Array.isArray(saved) ? saved.filter(item => typeof item === 'string') : []);
+      } catch (_) {
+        return new Set();
+      }
+    }
+
+    function saveBookmarks() {
+      try {
+        localStorage.setItem(BOOKMARKS_KEY, JSON.stringify([...bookmarks]));
+      } catch (error) {
+        console.warn('Could not save game bookmarks:', error);
+        setStatus('Bookmarks could not be saved. Check your browser storage settings.');
+      }
+    }
+
+    function loadRecentlyPlayed() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+        return Array.isArray(saved) ? saved.filter(item => typeof item === 'string').slice(0, 20) : [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function loadShowRecentlyPlayedSetting() {
+      try {
+        const preferences = JSON.parse(localStorage.getItem(SITE_SETTINGS_KEY) || '{}');
+        return preferences.showRecentlyPlayed === true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function recordRecentlyPlayed(game) {
+      recentlyPlayed = [game.folder, ...recentlyPlayed.filter(folder => folder !== game.folder)].slice(0, 20);
+      try {
+        localStorage.setItem(RECENT_KEY, JSON.stringify(recentlyPlayed));
+      } catch (error) {
+        console.warn('Could not save recent games:', error);
+      }
+    }
+
+    function updateBookmarkButton(button, game) {
+      const saved = bookmarks.has(game.folder);
+      button.classList.toggle('is-bookmarked', saved);
+      button.setAttribute('aria-pressed', saved ? 'true' : 'false');
+      button.setAttribute('aria-label', (saved ? 'Remove bookmark for ' : 'Bookmark ') + game.title);
+      button.title = saved ? 'Remove bookmark' : 'Bookmark game';
+      button.textContent = saved ? '★' : '☆';
+    }
+
+    function toggleBookmark(game, button) {
+      if (bookmarks.has(game.folder)) bookmarks.delete(game.folder);
+      else bookmarks.add(game.folder);
+      saveBookmarks();
+      updateBookmarkButton(button, game);
+      applySearch();
+    }
+
+
+    function updateTotals() {
+      const shown = Math.min(currentLimit, visibleGames.length);
+      const countText = `${visibleGames.length} matching games`;
+      totalEl.textContent = showBookmarkedOnly
+        ? `${visibleGames.length} bookmarked · ${countText}`
+        : countText;
+      pagination.hidden = visibleGames.length <= shown;
+      paginationStatus.textContent = `Showing ${shown} of ${visibleGames.length}. Only ${PAGE_SIZE} cards are added at a time.`;
+      loadMoreButton.textContent = `Load ${Math.min(PAGE_SIZE, visibleGames.length - shown)} more`;
+      bookmarkFilter.setAttribute('aria-pressed', showBookmarkedOnly ? 'true' : 'false');
+      bookmarkFilter.textContent = showBookmarkedOnly ? '★ Showing bookmarks' : '☆ Bookmarks';
+    }
+
+    function applySearch() {
+      currentLimit = PAGE_SIZE;
+      const query = activeSearchQuery;
+      visibleGames = games.filter(game =>
+        (!query || game.searchText.includes(query)) &&
+        (!showBookmarkedOnly || bookmarks.has(game.folder))
+      );
+      visibleGames.sort((a, b) => {
+        const bookmarkOrder = Number(bookmarks.has(b.folder)) - Number(bookmarks.has(a.folder));
+        if (bookmarkOrder) return bookmarkOrder;
+        if (sortMode === 'za') return b.title.localeCompare(a.title, undefined, { numeric: true, sensitivity: 'base' });
+        if (sortMode === 'recent') {
+          const aIndex = recentlyPlayed.indexOf(a.folder);
+          const bIndex = recentlyPlayed.indexOf(b.folder);
+          return (aIndex < 0 ? Infinity : aIndex) - (bIndex < 0 ? Infinity : bIndex) ||
+            a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
+        }
+        return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
+      });
+      renderGames();
+      updateSearchUrl();
+    }
+
+    function makeCard(game) {
+      const card = document.createElement('article');
+      card.className = 'game-card';
+      card.tabIndex = 0;
+      card.setAttribute('role', 'group');
+      card.setAttribute('aria-label', 'Play ' + game.title);
+
+      const thumbnail = document.createElement('div');
+      thumbnail.className = 'game-thumbnail-wrap';
+      if (game.coverPath) {
+        const img = document.createElement('img');
+        img.className = 'game-thumbnail';
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.alt = game.title + ' cover';
+        img.src = CDN_ROOT + encodePath(game.coverPath);
+        img.onerror = () => {
+          img.remove();
+          const fallback = document.createElement('div');
+          fallback.className = 'game-thumbnail-placeholder';
+          fallback.textContent = game.title.slice(0, 1).toUpperCase();
+          thumbnail.prepend(fallback);
+        };
+        thumbnail.appendChild(img);
+      } else {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'game-thumbnail-placeholder';
+        placeholder.textContent = game.title.slice(0, 1).toUpperCase();
+        thumbnail.appendChild(placeholder);
+      }
+
+      const bookmarkButton = document.createElement('button');
+      bookmarkButton.type = 'button';
+      bookmarkButton.className = 'game-bookmark-btn';
+      bookmarkButton.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleBookmark(game, bookmarkButton);
+      });
+      updateBookmarkButton(bookmarkButton, game);
+      thumbnail.appendChild(bookmarkButton);
+      card.appendChild(thumbnail);
+
+      const heading = document.createElement('h3');
+      heading.textContent = game.title;
+      card.appendChild(heading);
+
+      if (game.htmlFiles.length > 1) {
+        const description = document.createElement('p');
+        description.textContent = game.htmlFiles.length + ' HTML files';
+        card.appendChild(description);
+      }
+
+      const folder = document.createElement('span');
+      folder.className = 'game-folder-name';
+      folder.textContent = game.folder + '/';
+      card.appendChild(folder);
+
+      card.addEventListener('click', () => openGame(game));
+      card.addEventListener('keydown', event => {
+        if (event.target !== card) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openGame(game);
+        }
+      });
+      return card;
+    }
+
+    function renderGames() {
+      container.replaceChildren();
+      const fragment = document.createDocumentFragment();
+      const bookmarked = visibleGames.filter(game => bookmarks.has(game.folder));
+      const pageGames = visibleGames.slice(0, currentLimit);
+
+      if (bookmarked.length) {
+        const heading = document.createElement('h2');
+        heading.className = 'games-group-heading';
+        heading.textContent = 'Bookmarked games';
+        fragment.appendChild(heading);
+        bookmarked.slice(0, currentLimit).forEach(game => fragment.appendChild(makeCard(game)));
+      }
+      const recentGames = showRecentlyPlayedGames
+        ? visibleGames.filter(game => recentlyPlayed.includes(game.folder)).slice(0, 8)
+        : [];
+      if (recentGames.length) {
+        const heading = document.createElement('h2');
+        heading.className = 'games-group-heading';
+        heading.textContent = 'Recently played';
+        fragment.appendChild(heading);
+        recentGames.forEach(game => fragment.appendChild(makeCard(game)));
+      }
+      if (pageGames.length) {
+        const heading = document.createElement('h2');
+        heading.className = 'games-group-heading';
+        heading.textContent = 'All games';
+        fragment.appendChild(heading);
+        pageGames.forEach(game => fragment.appendChild(makeCard(game)));
+      }
+      if (!visibleGames.length) {
+        const empty = document.createElement('p');
+        empty.id = 'gamesEmpty';
+        empty.textContent = showBookmarkedOnly
+          ? 'No bookmarked games match this search yet.'
+          : (games.length ? 'No games match that search.' : 'No game folders containing an index.html were found.');
+        fragment.appendChild(empty);
+      }
+      container.appendChild(fragment);
+      updateTotals();
+      if (!games.length) totalEl.textContent = '';
+    }
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+
+    let zipLibraryPromise = null;
+    function loadZipLibrary() {
+      if (window.JSZip) return Promise.resolve(window.JSZip);
+      if (!zipLibraryPromise) {
+        zipLibraryPromise = new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+          script.onload = () => window.JSZip ? resolve(window.JSZip) : reject(new Error('ZIP library did not initialize.'));
+          script.onerror = () => reject(new Error('Could not load the ZIP library. Check your connection and try again.'));
+          document.head.appendChild(script);
+        });
+      }
+      return zipLibraryPromise;
+    }
+
+    async function fetchGameFileList(game) {
+      const pending = [game.folder];
+      const files = [];
+      while (pending.length) {
+        const directory = pending.shift();
+        const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodePath(directory)}?ref=${encodeURIComponent(BRANCH)}`;
+        const response = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
+        if (!response.ok) throw new Error(`Could not list ${directory} (HTTP ${response.status}).`);
+        const entries = await response.json();
+        if (!Array.isArray(entries)) throw new Error('GitHub returned an unexpected file list.');
+        for (const entry of entries) {
+          if (entry.type === 'file') files.push({ path: entry.path, size: entry.size || 0 });
+          else if (entry.type === 'dir') pending.push(entry.path);
+        }
+      }
+      return files;
+    }
+
+    async function downloadGame(game, button) {
+      const originalLabel = button.textContent;
+      button.disabled = true;
+      try {
+        if (!Array.isArray(game.files) || !game.files.length) game.files = await fetchGameFileList(game);
+        if (!game.files.length) throw new Error('No files were found in this game folder.');
+        const JSZip = await loadZipLibrary();
+        const zip = new JSZip();
+        const files = game.files.slice();
+        let completed = 0;
+        let next = 0;
+        let failed = [];
+        button.textContent = 'Preparing 0/' + files.length;
+        async function worker() {
+          while (next < files.length) {
+            const index = next++;
+            const item = files[index];
+            try {
+              const response = await fetch(CDN_ROOT + encodePath(item.path));
+              if (!response.ok) throw new Error('HTTP ' + response.status);
+              const data = await response.arrayBuffer();
+              const relativePath = item.path.slice(game.folder.length + 1);
+              zip.file(relativePath, data);
+            } catch (error) {
+              failed.push(item.path + ' (' + error.message + ')');
+            }
+            completed++;
+            button.textContent = 'Files ' + completed + '/' + files.length;
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(5, files.length) }, () => worker()));
+        if (failed.length) throw new Error(failed.length + ' file(s) could not be downloaded. First: ' + failed[0]);
+        button.textContent = 'Building ZIP…';
+        const blob = await zip.generateAsync(
+          { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } },
+          progress => { button.textContent = 'Zipping ' + Math.round(progress.percent) + '%'; }
+        );
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = game.folder.replace(/[^a-z0-9._-]+/gi, '-') + '.zip';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        setStatus('Downloaded ' + game.title + ' (' + files.length + ' files).');
+      } catch (error) {
+        console.error('Game download failed:', error);
+        alert('Could not download ' + game.title + ': ' + error.message);
+      } finally {
+        // Do not retain this game's full file tree after the one-shot ZIP operation.
+        delete game.files;
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
+    }
+
+    async function loadGames(forceRefresh = false) {
+      if (isLoading) return;
+      isLoading = true;
+      const cached = (() => {
+        try { return JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); }
+        catch (_) { return null; }
+      })();
+
+      if (!forceRefresh && cached && Array.isArray(cached.games) && Date.now() - cached.savedAt < CACHE_TTL) {
+        games = cached.games;
+        applySearch();
+        setStatus('Loaded the saved game list.');
+        openGameFromAddress();
+        isLoading = false;
+        return;
+      }
+
+      setStatus('Fetching game folders from hummingbird-9/games…');
+      totalEl.textContent = 'Loading…';
+      try {
+        const response = await fetch(TREE_API, { headers: { Accept: 'application/vnd.github+json' } });
+        if (!response.ok) {
+          if (response.status === 403) throw new Error('GitHub API rate limit reached. Try Refresh again later.');
+          if (response.status === 404) throw new Error('The games repository or main branch could not be found.');
+          throw new Error('GitHub returned HTTP ' + response.status + '.');
+        }
+        const data = await response.json();
+        if (!Array.isArray(data.tree)) throw new Error('GitHub returned an unexpected repository tree.');
+        if (data.truncated) throw new Error('GitHub returned a truncated file tree, so the full game list could not be read.');
+
+        games = makeCatalog(data.tree);
+        const compactGames = games.map(({ files, ...game }) => game);
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt: Date.now(), games: compactGames })); }
+        catch (cacheError) { console.warn('Game list loaded, but could not cache it:', cacheError); }
+        applySearch();
+        setStatus(`Found ${games.length} games from the GitHub folders.`);
+        openGameFromAddress();
+      } catch (error) {
+        console.error('Game catalog load failed:', error);
+        if (cached && Array.isArray(cached.games) && cached.games.length) {
+          games = cached.games;
+          applySearch();
+          setStatus('Could not refresh GitHub (' + error.message + '). Showing the last saved game list.');
+          openGameFromAddress();
+        } else {
+          games = [];
+          visibleGames = [];
+          renderGames();
+          setStatus('Could not load the game list: ' + error.message);
+        }
+      } finally {
+        isLoading = false;
+      }
+    }
+
+    function setHtmlChoices(game) {
+      htmlSelector.replaceChildren();
+      game.htmlFiles.forEach(file => {
+        const option = document.createElement('option');
+        option.value = file;
+        option.textContent = file;
+        htmlSelector.appendChild(option);
+      });
+      htmlSelector.disabled = false;
+      htmlSelector.title = game.htmlFiles.length > 1
+        ? 'Choose which HTML file to play for this game'
+        : 'This game has one entry point: index.html';
+      htmlSelector.value = game.htmlFiles[0] || 'index.html';
+    }
+
+    function createGameFrame() {
+      const oldFrame = document.getElementById('gameFrame');
+      if (oldFrame) oldFrame.remove();
+      const frame = document.createElement('iframe');
+      frame.id = 'gameFrame';
+      frame.title = activeGame ? activeGame.title : 'Selected game';
+      frame.allow = 'autoplay; fullscreen; gamepad; clipboard-read; clipboard-write';
+      frameWrap.appendChild(frame);
+      return frame;
+    }
+
+    function loadActiveHtml() {
+      if (!activeGame) return;
+      const game = activeGame;
+      activeHtml = htmlSelector.value || 'index.html';
+      updateGameAddress(game, activeHtml);
+      const frame = createGameFrame();
+
+      // Load the game's real URL rather than injecting its source through srcdoc.
+      // Construct 3 and other games create workers relative to their document URL;
+      // srcdoc gives them an about:srcdoc origin and can turn worker paths into file:///.
+      // A direct URL also makes relative assets and service-worker scopes resolve normally.
+      frame.src = gameUrl(game, activeHtml);
+    }
+
+    function updateGameAddress(game, htmlFile) {
+      const url = new URL(window.location.href);
+      if (game) {
+        url.searchParams.set('game', game.folder);
+        if (htmlFile && htmlFile !== 'index.html') url.searchParams.set('file', htmlFile);
+        else url.searchParams.delete('file');
+      } else {
+        url.searchParams.delete('game');
+        url.searchParams.delete('file');
+      }
+      // Keep one history entry for the page instead of pushing every game launch.
+      window.history.replaceState({ ...(window.history.state || {}), activeGame: game ? game.folder : null }, '', url.pathname + url.search + url.hash);
+    }
+
+    function openGameFromAddress() {
+      if (restoredGameFromAddress) return;
+      const params = new URLSearchParams(window.location.search);
+      const folder = params.get('game');
+      if (!folder) return;
+      const game = games.find(item => item.folder === folder);
+      if (!game) return;
+      restoredGameFromAddress = true;
+      openGame(game, params.get('file'));
+    }
+
+    function openGame(game, requestedFile) {
+      recordRecentlyPlayed(game);
+      activeGame = game;
+      activeHtml = game.htmlFiles[0] || 'index.html';
+      viewerTitle.textContent = game.title;
+      setHtmlChoices(game);
+      if (requestedFile && game.htmlFiles.includes(requestedFile)) {
+        htmlSelector.value = requestedFile;
+        activeHtml = requestedFile;
+      }
+      updateGameAddress(game, activeHtml);
+      applySearch();
+      viewer.classList.add('is-open');
+      viewer.setAttribute('aria-hidden', 'false');
+      document.body.style.overflow = 'hidden';
+      loadActiveHtml();
+      document.getElementById('closeGame').focus();
+    }
+
+    function closeGame() {
+      updateGameAddress(null);
+      viewer.classList.remove('is-open');
+      viewer.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+      activeGame = null;
+      activeLoadToken++;
+      const frame = document.getElementById('gameFrame');
+      if (frame) {
+        frame.src = 'about:blank';
+        frame.remove();
+      }
+      htmlSelector.replaceChildren();
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'HTML file — open a game first';
+      htmlSelector.appendChild(option);
+      htmlSelector.disabled = true;
+      htmlSelector.title = 'Choose a game first';
+    }
+
+    function openGameInAboutBlank() {
+      if (!activeGame) return;
+      const file = htmlSelector.value || activeHtml || 'index.html';
+      // Open the game URL directly. This uses the same document origin and
+      // relative-asset behavior as the in-page game iframe.
+      const popup = window.open(gameUrl(activeGame, file), '_blank');
+      if (!popup) {
+        alert('Your browser blocked the new tab. Allow pop-ups for this site and try again.');
+      }
+    }
+
+    document.getElementById('refreshGames').addEventListener('click', () => loadGames(true));
+    randomGameButton.addEventListener('click', () => {
+      const pool = visibleGames.length ? visibleGames : games;
+      if (!pool.length) {
+        setStatus('There are no games available to launch yet.');
+        return;
+      }
+      openGame(pool[Math.floor(Math.random() * pool.length)]);
+    });
+    searchForm.addEventListener('submit', event => {
+      event.preventDefault();
+      activeSearchQuery = searchBar.value.trim().toLowerCase();
+      applySearch();
+    });
+    sortSelect.addEventListener('change', () => {
+      sortMode = sortSelect.value;
+      applySearch();
+    });
+    function syncRecentGamesPreference() {
+      const nextValue = loadShowRecentlyPlayedSetting();
+      if (nextValue === showRecentlyPlayedGames) return;
+      showRecentlyPlayedGames = nextValue;
+      renderGames();
+    }
+    window.addEventListener('hummingbird-settings-updated', event => {
+      showRecentlyPlayedGames = event.detail?.showRecentlyPlayed === true;
+      renderGames();
+    });
+    window.addEventListener('storage', event => {
+      if (event.key === SITE_SETTINGS_KEY) syncRecentGamesPreference();
+    });
+    searchBar.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && searchBar.value) {
+        searchBar.value = '';
+        activeSearchQuery = '';
+        applySearch();
+      }
+    });
+    document.addEventListener('keydown', event => {
+      const target = event.target;
+      const editing = target instanceof HTMLElement &&
+        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+      if (event.key === '/' && !editing && !viewer.classList.contains('is-open')) {
+        event.preventDefault();
+        searchBar.focus();
+      }
+    });
+    let autoLoadBusy = false;
+    let scrollCheckFrame = 0;
+
+    function loadNextGamesPage() {
+      if (autoLoadBusy || currentLimit >= visibleGames.length) return;
+      autoLoadBusy = true;
+      currentLimit = Math.min(currentLimit + PAGE_SIZE, visibleGames.length);
+      renderGames();
+      requestAnimationFrame(() => {
+        autoLoadBusy = false;
+        checkGamesBottom();
+      });
+    }
+
+    function checkGamesBottom() {
+      if (scrollCheckFrame) return;
+      scrollCheckFrame = requestAnimationFrame(() => {
+        scrollCheckFrame = 0;
+        if (autoLoadBusy || pagination.hidden || currentLimit >= visibleGames.length) return;
+        const documentHeight = Math.max(
+          document.documentElement.scrollHeight,
+          document.body.scrollHeight
+        );
+        const distanceToBottom = documentHeight - (window.scrollY + window.innerHeight);
+        if (distanceToBottom <= 100) loadNextGamesPage();
+      });
+    }
+
+    loadMoreButton.addEventListener('click', loadNextGamesPage);
+    window.addEventListener('scroll', checkGamesBottom, { passive: true });
+    window.addEventListener('resize', checkGamesBottom);
+    htmlSelector.addEventListener('change', loadActiveHtml);
+    document.getElementById('closeGame').addEventListener('click', closeGame);
+    document.getElementById('aboutBlankGame').addEventListener('click', openGameInAboutBlank);
+    document.getElementById('downloadActiveGame').addEventListener('click', event => {
+      if (activeGame) downloadGame(activeGame, event.currentTarget);
+    });
+    bookmarkFilter.addEventListener('click', () => {
+      showBookmarkedOnly = !showBookmarkedOnly;
+      applySearch();
+    });
+    viewer.addEventListener('click', event => { if (event.target === viewer) closeGame(); });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && viewer.classList.contains('is-open')) closeGame();
+    });
+
+    const initialQuery = new URLSearchParams(window.location.search).get('q') || '';
+    searchBar.value = initialQuery;
+    activeSearchQuery = initialQuery.trim().toLowerCase();
+    loadGames(false);
+  })();
+  </script>
+</body>
+</html>
